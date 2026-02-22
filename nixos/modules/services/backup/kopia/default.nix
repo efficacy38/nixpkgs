@@ -2,11 +2,9 @@
   config,
   lib,
   pkgs,
-  utils,
   ...
 }:
 let
-  inherit (utils.systemdUtils.unitOptions) unitOption;
   cfg = config.services.kopia;
 in
 {
@@ -36,17 +34,6 @@ in
               example = "/run/secrets/kopia-password";
             };
 
-            environmentFile = lib.mkOption {
-              type = with lib.types; nullOr str;
-              default = null;
-              description = ''
-                File containing credentials to access the repository, in the
-                format of an EnvironmentFile as described by {manpage}`systemd.exec(5)`.
-                For S3 backends, this should contain AWS_ACCESS_KEY_ID and
-                AWS_SECRET_ACCESS_KEY.
-              '';
-            };
-
             user = lib.mkOption {
               type = lib.types.str;
               default = "root";
@@ -55,23 +42,6 @@ in
               '';
             };
 
-            timerConfig = lib.mkOption {
-              type = lib.types.nullOr (lib.types.attrsOf unitOption);
-              default = {
-                OnCalendar = "daily";
-                Persistent = true;
-              };
-              description = ''
-                When to run the backup. See {manpage}`systemd.timer(5)` for details.
-                If null no timer is created and the backup will only run when
-                explicitly started.
-              '';
-              example = {
-                OnCalendar = "00:05";
-                RandomizedDelaySec = "5h";
-                Persistent = true;
-              };
-            };
           };
         }
       )
@@ -127,8 +97,9 @@ in
           # s3.endpoint defaults to "s3.amazonaws.com" and can be omitted for AWS.
           # s3.region defaults to "us-east-1" and can be omitted if that is your region.
           passwordFile = "/run/secrets/kopia-password";
-          # environmentFile should contain AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY.
-          environmentFile = "/run/secrets/kopia-s3-credentials";
+          # S3 credentials read from files at runtime.
+          s3.accessKeyIdFile = "/run/secrets/aws-access-key-id";
+          s3.secretAccessKeyFile = "/run/secrets/aws-secret-access-key";
           # NOTE: when using preSnapshot, the path being backed up must be the
           # mount point of a ZFS dataset. A subdirectory within a dataset cannot
           # be snapshotted — only datasets can.
@@ -185,15 +156,5 @@ in
         };
       }
     '';
-  };
-
-  config = lib.mkIf (cfg.backups != { }) {
-    systemd.timers = lib.mapAttrs' (
-      name: backup:
-      lib.nameValuePair "kopia-snapshot-${name}" {
-        wantedBy = [ "timers.target" ];
-        inherit (backup) timerConfig;
-      }
-    ) (lib.filterAttrs (_: b: b.timerConfig != null && b.paths != [ ]) cfg.backups);
   };
 }

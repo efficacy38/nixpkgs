@@ -8,22 +8,31 @@
     KOPIA_CONFIG_PATH = "/var/lib/kopia/${name}/repository.config";
   };
 
-  mkBaseServiceConfig =
-    name: backup:
+  mkBaseServiceConfig = name: backup: {
+    Type = "oneshot";
+    User = backup.user;
+    StateDirectory = "kopia/${name}";
+    PrivateTmp = true;
+    NoNewPrivileges = true;
+    ProtectSystem = "strict";
+    ReadWritePaths = [
+      "/var/lib/kopia/${name}"
+    ]
+    ++ lib.optional (backup.repositoryType == "filesystem") backup.repositoryPath;
+  };
+
+  # Assert two options are mutually exclusive (both can be null).
+  mkMutualExclusionAssertion =
     {
-      Type = "oneshot";
-      User = backup.user;
-      StateDirectory = "kopia/${name}";
-      PrivateTmp = true;
-      NoNewPrivileges = true;
-      ProtectSystem = "strict";
-      ReadWritePaths = [
-        "/var/lib/kopia/${name}"
-      ]
-      ++ lib.optional (backup.repositoryType == "filesystem") backup.repositoryPath;
-    }
-    // lib.optionalAttrs (backup.environmentFile != null) {
-      EnvironmentFile = backup.environmentFile;
+      name,
+      optionA,
+      optionB,
+      valueA,
+      valueB,
+    }:
+    {
+      assertion = !(valueA != null && valueB != null);
+      message = "services.kopia.backups.${name}: ${optionA} and ${optionB} are mutually exclusive";
     };
 
   # Generate a warning when a plain text secret is used instead of a file reference.

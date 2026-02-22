@@ -2,6 +2,11 @@
 let
   passwordFile = "${pkgs.writeText "kopia-password" "test-password"}";
   webPasswordFile = "${pkgs.writeText "kopia-web-password" "test-web-pass"}";
+  s3AccessKeyIdFile = "${pkgs.writeText "s3-access-key-id" "minioadmin"}";
+  s3SecretAccessKeyFile = "${pkgs.writeText "s3-secret-access-key" "minioadmin"}";
+  webdavUsernameFile = "${pkgs.writeText "webdav-username" "kopia"}";
+  webdavPasswordFile = "${pkgs.writeText "webdav-password" "kopia-webdav-pass"}";
+  sftpPasswordFile = "${pkgs.writeText "sftp-password" "kopia-sftp-pass"}";
 
   testDir = pkgs.stdenvNoCC.mkDerivation {
     name = "test-files-to-backup";
@@ -39,6 +44,22 @@ in
         home = "/home/kopia";
         createHome = true;
       };
+
+      services.minio = {
+        enable = true;
+        rootCredentialsFile = pkgs.writeText "minio-credentials" ''
+          MINIO_ROOT_USER=minioadmin
+          MINIO_ROOT_PASSWORD=minioadmin
+        '';
+      };
+
+      # Open MinIO and WebDAV ports
+      networking.firewall.allowedTCPPorts = [
+        8080
+        9000
+      ];
+
+      systemd.services.nginx.serviceConfig.ReadWritePaths = [ "/var/lib/webdav" ];
 
       services.nginx = {
         enable = true;
@@ -139,7 +160,7 @@ in
           backupCleanupCommand = "#!/bin/sh\ntouch /var/lib/kopia/with-hooks/cleanup-ran";
         };
 
-        # Test: SFTP backend with password auth
+        # Test: SFTP backend with plain text password
         sftp-basic = {
           repositoryType = "sftp";
           sftp = {
@@ -147,20 +168,78 @@ in
             path = "/home/kopia/repo";
             username = "kopia";
             password = "kopia-sftp-pass";
-            knownHostsFile = "/etc/ssh/ssh_known_hosts";
+            knownHostsFile = "/root/.ssh/known_hosts";
           };
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
         };
 
-        # Test: WebDAV backend with password auth
+        # Test: SFTP backend with file-based password
+        sftp-password-file = {
+          repositoryType = "sftp";
+          sftp = {
+            host = "server";
+            path = "/home/kopia/repo-file";
+            username = "kopia";
+            passwordFile = sftpPasswordFile;
+            knownHostsFile = "/root/.ssh/known_hosts";
+          };
+          inherit passwordFile;
+          paths = [ "/opt" ];
+          timerConfig = null;
+        };
+
+        # Test: WebDAV backend with plain text credentials
         webdav-basic = {
           repositoryType = "webdav";
           webdav = {
             url = "http://server:8080/";
             username = "kopia";
             password = "kopia-webdav-pass";
+          };
+          inherit passwordFile;
+          paths = [ "/opt" ];
+          timerConfig = null;
+        };
+
+        # Test: WebDAV backend with file-based credentials
+        webdav-file-creds = {
+          repositoryType = "webdav";
+          webdav = {
+            url = "http://server:8080/file-creds/";
+            usernameFile = webdavUsernameFile;
+            passwordFile = webdavPasswordFile;
+          };
+          inherit passwordFile;
+          paths = [ "/opt" ];
+          timerConfig = null;
+        };
+
+        # Test: S3 backend with file-based credentials (via MinIO)
+        s3-basic = {
+          repositoryType = "s3";
+          s3 = {
+            bucket = "kopia-test";
+            endpoint = "server:9000";
+            accessKeyIdFile = s3AccessKeyIdFile;
+            secretAccessKeyFile = s3SecretAccessKeyFile;
+            disableTLS = true;
+          };
+          inherit passwordFile;
+          paths = [ "/opt" ];
+          timerConfig = null;
+        };
+
+        # Test: S3 backend with plain text credentials
+        s3-plaintext = {
+          repositoryType = "s3";
+          s3 = {
+            bucket = "kopia-test-plaintext";
+            endpoint = "server:9000";
+            accessKeyId = "minioadmin";
+            secretAccessKey = "minioadmin";
+            disableTLS = true;
           };
           inherit passwordFile;
           paths = [ "/opt" ];
@@ -278,7 +357,7 @@ in
         server.wait_for_unit("sshd.service")
         # Populate known_hosts on machine from server's host key
         machine.succeed(
-            "mkdir -p /etc/ssh && ssh-keyscan server > /etc/ssh/ssh_known_hosts 2>/dev/null"
+            "mkdir -p /root/.ssh && ssh-keyscan server > /root/.ssh/known_hosts 2>/dev/null"
         )
         # Create repo directory on server
         server.succeed("mkdir -p /home/kopia/repo && chown kopia:users /home/kopia/repo")
@@ -286,6 +365,15 @@ in
         machine.succeed("systemctl start kopia-snapshot-sftp-basic.service")
         machine.succeed(
             "${kopiaEnv "sftp-basic"}"
+            " kopia snapshot list /opt --json | jq -e 'length == 1'"
+        )
+
+    with subtest("sftp-password-file: repository connect with file-based password"):
+        server.succeed("mkdir -p /home/kopia/repo-file && chown kopia:users /home/kopia/repo-file")
+        machine.succeed("systemctl start kopia-repository-sftp-password-file.service")
+        machine.succeed("systemctl start kopia-snapshot-sftp-password-file.service")
+        machine.succeed(
+            "${kopiaEnv "sftp-password-file"}"
             " kopia snapshot list /opt --json | jq -e 'length == 1'"
         )
 
@@ -304,6 +392,38 @@ in
         machine.succeed("systemctl start kopia-snapshot-webdav-basic.service")
         machine.succeed(
             "${kopiaEnv "webdav-basic"}"
+            " kopia snapshot list /opt --json | jq -e 'length == 1'"
+        )
+
+    with subtest("webdav-file-creds: repository connect with file-based credentials"):
+        machine.succeed("systemctl start kopia-repository-webdav-file-creds.service")
+        machine.succeed("systemctl start kopia-snapshot-webdav-file-creds.service")
+        machine.succeed(
+            "${kopiaEnv "webdav-file-creds"}"
+            " kopia snapshot list /opt --json | jq -e 'length == 1'"
+        )
+
+    with subtest("s3-basic: repository connect and snapshot over S3 (file-based credentials)"):
+        server.wait_for_unit("minio.service")
+        server.wait_for_open_port(9000)
+        # Create buckets using MinIO client
+        server.succeed(
+            "${pkgs.minio-client}/bin/mc alias set local http://localhost:9000 minioadmin minioadmin"
+        )
+        server.succeed("${pkgs.minio-client}/bin/mc mb local/kopia-test")
+        server.succeed("${pkgs.minio-client}/bin/mc mb local/kopia-test-plaintext")
+        machine.succeed("systemctl start kopia-repository-s3-basic.service")
+        machine.succeed("systemctl start kopia-snapshot-s3-basic.service")
+        machine.succeed(
+            "${kopiaEnv "s3-basic"}"
+            " kopia snapshot list /opt --json | jq -e 'length == 1'"
+        )
+
+    with subtest("s3-plaintext: repository connect with plain text credentials"):
+        machine.succeed("systemctl start kopia-repository-s3-plaintext.service")
+        machine.succeed("systemctl start kopia-snapshot-s3-plaintext.service")
+        machine.succeed(
+            "${kopiaEnv "s3-plaintext"}"
             " kopia snapshot list /opt --json | jq -e 'length == 1'"
         )
 

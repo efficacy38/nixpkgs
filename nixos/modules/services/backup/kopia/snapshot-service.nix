@@ -2,9 +2,11 @@
   config,
   lib,
   pkgs,
+  utils,
   ...
 }:
 let
+  inherit (utils.systemdUtils.unitOptions) unitOption;
   cfg = config.services.kopia;
   helpers = import ./helpers.nix { inherit lib; };
 
@@ -27,56 +29,57 @@ let
 
   mkPreSnapshotScript =
     name: backup:
-    let
-      snapshotPath = mkSnapshotPath name backup;
-      subvolume = lib.escapeShellArg backup.preSnapshot.subvolume;
-      escapedSnapshotPath = lib.escapeShellArg snapshotPath;
-    in
     if !backup.preSnapshot.enable then
       ""
-    else if backup.preSnapshot.type == "btrfs" then
-      ''
-        # Clean up any leftover snapshot (recursive to handle nested subvols)
-        if ${btrfsExe} subvolume show ${escapedSnapshotPath} &>/dev/null; then
-          ${btrfsExe} subvolume delete -R ${escapedSnapshotPath}
-        fi
-
-        # Create a writable snapshot of the top-level subvolume.
-        # Writable because we need to replace empty stubs for nested subvolumes.
-        ${btrfsExe} subvolume snapshot \
-          ${subvolume} \
-          ${escapedSnapshotPath}
-
-        # Recursively snapshot nested subvolumes.
-        # btrfs subvolume list -o lists subvolumes below the given path with
-        # btrfs-internal paths (relative to filesystem root). We strip the
-        # source subvolume's prefix to get paths relative to the subvolume.
-        src_btrfs_path=$(${btrfsExe} subvolume show ${subvolume} | head -1 | xargs)
-        ${btrfsExe} subvolume list -o ${subvolume} | awk '{print $NF}' | while IFS= read -r nested_path; do
-          rel="''${nested_path#"$src_btrfs_path"/}"
-          src="${lib.strings.removeSuffix "/" (lib.escapeShellArg backup.preSnapshot.subvolume)}/$rel"
-          dst="${lib.strings.removeSuffix "/" (lib.escapeShellArg snapshotPath)}/$rel"
-          # Remove the empty stub directory left by the parent snapshot
-          rm -df "$dst" 2>/dev/null || true
-          # Create a read-only snapshot of the nested subvolume
-          ${btrfsExe} subvolume snapshot -r "$src" "$dst"
-        done
-      ''
     else
       let
-        zfsSnapshotName = lib.escapeShellArg (mkZfsSnapshotName name backup);
+        snapshotPath = mkSnapshotPath name backup;
+        escapedSnapshotPath = lib.escapeShellArg snapshotPath;
+        subvolume = lib.escapeShellArg backup.preSnapshot.subvolume;
       in
-      ''
-        if ${zfsExe} list -t snapshot ${zfsSnapshotName} &>/dev/null; then
-          ${umountExe} ${lib.escapeShellArg snapshotPath} 2>/dev/null || true
-          ${zfsExe} destroy ${zfsSnapshotName}
-        fi
-        ${zfsExe} snapshot ${zfsSnapshotName}
-        mkdir -p ${lib.escapeShellArg snapshotPath}
-        ${mountExe} -t zfs \
-          ${zfsSnapshotName} \
-          ${lib.escapeShellArg snapshotPath}
-      '';
+      if backup.preSnapshot.type == "btrfs" then
+        ''
+          # Clean up any leftover snapshot (recursive to handle nested subvols)
+          if ${btrfsExe} subvolume show ${escapedSnapshotPath} &>/dev/null; then
+            ${btrfsExe} subvolume delete -R ${escapedSnapshotPath}
+          fi
+
+          # Create a writable snapshot of the top-level subvolume.
+          # Writable because we need to replace empty stubs for nested subvolumes.
+          ${btrfsExe} subvolume snapshot \
+            ${subvolume} \
+            ${escapedSnapshotPath}
+
+          # Recursively snapshot nested subvolumes.
+          # btrfs subvolume list -o lists subvolumes below the given path with
+          # btrfs-internal paths (relative to filesystem root). We strip the
+          # source subvolume's prefix to get paths relative to the subvolume.
+          src_btrfs_path=$(${btrfsExe} subvolume show ${subvolume} | head -1 | xargs)
+          ${btrfsExe} subvolume list -o ${subvolume} | awk '{print $NF}' | while IFS= read -r nested_path; do
+            rel="''${nested_path#"$src_btrfs_path"/}"
+            src="${lib.strings.removeSuffix "/" (lib.escapeShellArg backup.preSnapshot.subvolume)}/$rel"
+            dst="${lib.strings.removeSuffix "/" (lib.escapeShellArg snapshotPath)}/$rel"
+            # Remove the empty stub directory left by the parent snapshot
+            rm -df "$dst" 2>/dev/null || true
+            # Create a read-only snapshot of the nested subvolume
+            ${btrfsExe} subvolume snapshot -r "$src" "$dst"
+          done
+        ''
+      else
+        let
+          zfsSnapshotName = lib.escapeShellArg (mkZfsSnapshotName name backup);
+        in
+        ''
+          if ${zfsExe} list -t snapshot ${zfsSnapshotName} &>/dev/null; then
+            ${umountExe} ${escapedSnapshotPath} 2>/dev/null || true
+            ${zfsExe} destroy ${zfsSnapshotName}
+          fi
+          ${zfsExe} snapshot ${zfsSnapshotName}
+          mkdir -p ${escapedSnapshotPath}
+          ${mountExe} -t zfs \
+            ${zfsSnapshotName} \
+            ${escapedSnapshotPath}
+        '';
 
   mkPostSnapshotScript =
     name: backup: path:
@@ -226,6 +229,24 @@ in
                 Set to `null` to leave unset.
               '';
             };
+
+            timerConfig = lib.mkOption {
+              type = lib.types.nullOr (lib.types.attrsOf unitOption);
+              default = {
+                OnCalendar = "daily";
+                Persistent = true;
+              };
+              description = ''
+                When to run the backup. See {manpage}`systemd.timer(5)` for details.
+                If null no timer is created and the backup will only run when
+                explicitly started.
+              '';
+              example = {
+                OnCalendar = "00:05";
+                RandomizedDelaySec = "5h";
+                Persistent = true;
+              };
+            };
           };
         }
       )
@@ -234,17 +255,31 @@ in
 
   config = lib.mkIf (cfg.backups != { }) {
     assertions = lib.flatten (
-      lib.mapAttrsToList (name: backup: [
-        {
-          assertion = backup.preSnapshot.enable -> backup.preSnapshot.subvolume != null;
-          message = "services.kopia.backups.${name}: preSnapshot.subvolume must be set when preSnapshot.enable is true";
-        }
-        {
-          assertion = backup.preSnapshot.enable -> lib.length backup.paths == 1;
-          message = "services.kopia.backups.${name}: exactly one path must be set when preSnapshot.enable is true";
-        }
-      ]) cfg.backups
+      lib.mapAttrsToList (
+        name: backup:
+        let
+          prefix = "services.kopia.backups.${name}";
+        in
+        [
+          {
+            assertion = backup.preSnapshot.enable -> backup.preSnapshot.subvolume != null;
+            message = "${prefix}: preSnapshot.subvolume must be set when preSnapshot.enable is true";
+          }
+          {
+            assertion = backup.preSnapshot.enable -> lib.length backup.paths == 1;
+            message = "${prefix}: exactly one path must be set when preSnapshot.enable is true";
+          }
+        ]
+      ) cfg.backups
     );
+
+    systemd.timers = lib.mapAttrs' (
+      name: backup:
+      lib.nameValuePair "kopia-snapshot-${name}" {
+        wantedBy = [ "timers.target" ];
+        inherit (backup) timerConfig;
+      }
+    ) (lib.filterAttrs (_: b: b.timerConfig != null && b.paths != [ ]) cfg.backups);
 
     systemd.services = lib.mapAttrs' (
       name: backup:
@@ -281,22 +316,24 @@ in
           after = [ (helpers.mkUnitQualifiedName "repository" name) ];
           environment = helpers.mkKopiaEnvironment name;
           restartIfChanged = false;
-          serviceConfig = baseServiceConfig // {
-            Nice = backup.nice;
-            ExecStart = snapshotScript;
-          }
-          // lib.optionalAttrs (backup.ioSchedulingClass != "none") {
-            IOSchedulingClass = backup.ioSchedulingClass;
-          }
-          // lib.optionalAttrs (backup.ioWeight != null) {
-            IOWeight = backup.ioWeight;
-          }
-          // lib.optionalAttrs backup.preSnapshot.enable {
-            ReadWritePaths =
-              baseServiceConfig.ReadWritePaths
-              ++ [ (builtins.dirOf backup.preSnapshot.subvolume) ]
-              ++ backup.paths;
-          };
+          serviceConfig =
+            baseServiceConfig
+            // {
+              Nice = backup.nice;
+              ExecStart = snapshotScript;
+            }
+            // lib.optionalAttrs (backup.ioSchedulingClass != "none") {
+              IOSchedulingClass = backup.ioSchedulingClass;
+            }
+            // lib.optionalAttrs (backup.ioWeight != null) {
+              IOWeight = backup.ioWeight;
+            }
+            // lib.optionalAttrs backup.preSnapshot.enable {
+              ReadWritePaths =
+                baseServiceConfig.ReadWritePaths
+                ++ [ (builtins.dirOf backup.preSnapshot.subvolume) ]
+                ++ backup.paths;
+            };
         }
         // lib.optionalAttrs (backup.preSnapshot.enable || backup.backupPrepareCommand != null) {
           preStart = ''
