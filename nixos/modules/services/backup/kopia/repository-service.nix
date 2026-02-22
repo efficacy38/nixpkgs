@@ -8,15 +8,325 @@ let
   cfg = config.services.kopia;
   helpers = import ./helpers.nix { inherit lib; };
 
-  mkRepositoryArgs =
-    backup:
-    if backup.repositoryType == "filesystem" then
-      [
-        "--path"
-        (lib.escapeShellArg backup.repositoryPath)
-      ]
+  # Generate a shell snippet that sets a variable from either a literal value or a file.
+  # If both are null, returns the empty string.
+  mkCredentialExport =
+    {
+      varName,
+      value,
+      valueFile,
+      export ? true,
+    }:
+    let
+      prefix = if export then "export " else "";
+    in
+    if value != null then
+      "${prefix}${varName}=${lib.escapeShellArg value}"
+    else if valueFile != null then
+      ''${prefix}${varName}="$(cat ${lib.escapeShellArg valueFile})"''
     else
-      throw "mkRepositoryArgs: unsupported repository type: ${backup.repositoryType}";
+      "";
+
+  # Generate the connect-or-create script body for a given backend type and args variable.
+  mkConnectOrCreate =
+    kopiaExe: backendType: argsVar:
+    ''
+      if ! ${kopiaExe} repository connect ${backendType} ''$${argsVar}; then
+        ${kopiaExe} repository create ${backendType} ''$${argsVar}
+      fi
+    '';
+
+  filesystemSubmodule = lib.types.submodule {
+    options = {
+      path = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          Path to local filesystem directory for the repository.
+        '';
+        example = "/mnt/backup";
+      };
+    };
+  };
+
+  s3Submodule = lib.types.submodule {
+    options = {
+      bucket = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          S3 bucket name.
+        '';
+      };
+
+      endpoint = lib.mkOption {
+        type = lib.types.str;
+        default = "s3.amazonaws.com";
+        description = ''
+          S3 endpoint URL.
+        '';
+      };
+
+      region = lib.mkOption {
+        type = lib.types.str;
+        default = "us-east-1";
+        description = ''
+          S3 region.
+        '';
+      };
+
+      disableTLS = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Disable TLS for S3 connections.
+        '';
+      };
+
+      accessKeyId = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          AWS access key ID for S3 authentication.
+          Mutually exclusive with {option}`accessKeyIdFile`.
+
+          ::: {.warning}
+          This value will be stored in the Nix store in plain text.
+          Prefer {option}`accessKeyIdFile` instead.
+          :::
+        '';
+      };
+
+      accessKeyIdFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the AWS access key ID.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`accessKeyId`.
+        '';
+      };
+
+      secretAccessKey = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          AWS secret access key for S3 authentication.
+          Mutually exclusive with {option}`secretAccessKeyFile`.
+
+          ::: {.warning}
+          This value will be stored in the Nix store in plain text.
+          Prefer {option}`secretAccessKeyFile` instead.
+          :::
+        '';
+      };
+
+      secretAccessKeyFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the AWS secret access key.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`secretAccessKey`.
+        '';
+      };
+
+      sessionToken = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          AWS session token for temporary credentials.
+          Mutually exclusive with {option}`sessionTokenFile`.
+
+          ::: {.warning}
+          This value will be stored in the Nix store in plain text.
+          Prefer {option}`sessionTokenFile` instead.
+          :::
+        '';
+      };
+
+      sessionTokenFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the AWS session token.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`sessionToken`.
+        '';
+      };
+    };
+  };
+
+  sftpSubmodule = lib.types.submodule {
+    options = {
+      host = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          SFTP server hostname.
+          Mutually exclusive with {option}`hostFile`.
+        '';
+      };
+
+      hostFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the SFTP server hostname.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`host`.
+        '';
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 22;
+        description = ''
+          SSH port for the SFTP connection.
+        '';
+      };
+
+      username = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          SSH username for the SFTP connection.
+        '';
+      };
+
+      path = lib.mkOption {
+        type = lib.types.str;
+        description = ''
+          Remote directory path for the repository on the SFTP server.
+        '';
+      };
+
+      keyFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to SSH private key file for authentication.
+          Preferred over password authentication.
+        '';
+      };
+
+      password = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          SFTP password for authentication.
+          Mutually exclusive with {option}`passwordFile`.
+
+          ::: {.warning}
+          This password will be stored in the Nix store in plain text.
+          Prefer {option}`passwordFile` or {option}`keyFile` instead.
+          :::
+        '';
+      };
+
+      passwordFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the SFTP password.
+          Mutually exclusive with {option}`password`.
+
+          ::: {.warning}
+          Password authentication is less secure than key-based authentication.
+          Prefer setting {option}`keyFile` with an SSH private key instead.
+          :::
+        '';
+      };
+
+      knownHostsFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to SSH known_hosts file for host key verification.
+        '';
+      };
+    };
+  };
+
+  webdavSubmodule = lib.types.submodule {
+    options = {
+      url = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          WebDAV server URL.
+          Mutually exclusive with {option}`urlFile`.
+        '';
+        example = "https://webdav.example.com/backup";
+      };
+
+      urlFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the WebDAV server URL.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`url`.
+        '';
+      };
+
+      username = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          WebDAV username for authentication.
+          Mutually exclusive with {option}`usernameFile`.
+        '';
+      };
+
+      usernameFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the WebDAV username.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`username`.
+        '';
+      };
+
+      password = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          WebDAV password for authentication.
+          Mutually exclusive with {option}`passwordFile`.
+
+          ::: {.warning}
+          This password will be stored in the Nix store in plain text.
+          Prefer {option}`passwordFile` instead.
+          :::
+        '';
+      };
+
+      passwordFile = lib.mkOption {
+        type = with lib.types; nullOr str;
+        default = null;
+        description = ''
+          Path to a file containing the WebDAV password.
+          Read at runtime for secrets management.
+          Mutually exclusive with {option}`password`.
+        '';
+      };
+
+      flat = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Use flat directory structure on the WebDAV server.
+        '';
+      };
+
+      atomicWrites = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Assume the WebDAV provider implements atomic writes.
+        '';
+      };
+    };
+  };
 in
 {
   options.services.kopia.backups = lib.mkOption {
@@ -25,306 +335,36 @@ in
         { ... }:
         {
           options = {
-            repositoryType = lib.mkOption {
-              type = lib.types.enum [
-                "filesystem"
-                "s3"
-                "sftp"
-                "webdav"
-              ];
+            repository = lib.mkOption {
+              type = lib.types.attrTag {
+                filesystem = lib.mkOption {
+                  type = filesystemSubmodule;
+                  description = ''
+                    Local filesystem repository backend.
+                  '';
+                };
+                s3 = lib.mkOption {
+                  type = s3Submodule;
+                  description = ''
+                    S3 repository backend.
+                  '';
+                };
+                sftp = lib.mkOption {
+                  type = sftpSubmodule;
+                  description = ''
+                    SFTP repository backend.
+                  '';
+                };
+                webdav = lib.mkOption {
+                  type = webdavSubmodule;
+                  description = ''
+                    WebDAV repository backend.
+                  '';
+                };
+              };
               description = ''
-                Type of repository backend to use.
+                Repository backend configuration. Exactly one backend must be selected.
               '';
-              example = "filesystem";
-            };
-
-            repositoryPath = lib.mkOption {
-              type = with lib.types; nullOr str;
-              default = null;
-              description = ''
-                Path to local filesystem directory for the repository.
-                Required when {option}`repositoryType` is `"filesystem"`.
-              '';
-              example = "/mnt/backup";
-            };
-
-            s3 = {
-              bucket = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  S3 bucket name. Required when {option}`repositoryType` is `"s3"`.
-                '';
-              };
-
-              endpoint = lib.mkOption {
-                type = lib.types.str;
-                default = "s3.amazonaws.com";
-                description = ''
-                  S3 endpoint URL.
-                '';
-              };
-
-              region = lib.mkOption {
-                type = lib.types.str;
-                default = "us-east-1";
-                description = ''
-                  S3 region.
-                '';
-              };
-
-              disableTLS = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
-                description = ''
-                  Disable TLS for S3 connections.
-                '';
-              };
-
-              accessKeyId = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  AWS access key ID for S3 authentication.
-                  Mutually exclusive with {option}`s3.accessKeyIdFile`.
-
-                  ::: {.warning}
-                  This value will be stored in the Nix store in plain text.
-                  Prefer {option}`s3.accessKeyIdFile` instead.
-                  :::
-                '';
-              };
-
-              accessKeyIdFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the AWS access key ID.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`s3.accessKeyId`.
-                '';
-              };
-
-              secretAccessKey = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  AWS secret access key for S3 authentication.
-                  Mutually exclusive with {option}`s3.secretAccessKeyFile`.
-
-                  ::: {.warning}
-                  This value will be stored in the Nix store in plain text.
-                  Prefer {option}`s3.secretAccessKeyFile` instead.
-                  :::
-                '';
-              };
-
-              secretAccessKeyFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the AWS secret access key.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`s3.secretAccessKey`.
-                '';
-              };
-
-              sessionToken = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  AWS session token for temporary credentials.
-                  Mutually exclusive with {option}`s3.sessionTokenFile`.
-
-                  ::: {.warning}
-                  This value will be stored in the Nix store in plain text.
-                  Prefer {option}`s3.sessionTokenFile` instead.
-                  :::
-                '';
-              };
-
-              sessionTokenFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the AWS session token.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`s3.sessionToken`.
-                '';
-              };
-            };
-
-            sftp = {
-              host = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  SFTP server hostname.
-                  Mutually exclusive with {option}`sftp.hostFile`.
-                '';
-              };
-
-              hostFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the SFTP server hostname.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`sftp.host`.
-                '';
-              };
-
-              port = lib.mkOption {
-                type = lib.types.port;
-                default = 22;
-                description = ''
-                  SSH port for the SFTP connection.
-                '';
-              };
-
-              username = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  SSH username for the SFTP connection.
-                  Required when {option}`repositoryType` is `"sftp"`.
-                '';
-              };
-
-              path = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Remote directory path for the repository on the SFTP server.
-                  Required when {option}`repositoryType` is `"sftp"`.
-                '';
-              };
-
-              keyFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to SSH private key file for authentication.
-                  Preferred over password authentication.
-                '';
-              };
-
-              password = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  SFTP password for authentication.
-                  Mutually exclusive with {option}`sftp.passwordFile`.
-
-                  ::: {.warning}
-                  This password will be stored in the Nix store in plain text.
-                  Prefer {option}`sftp.passwordFile` or {option}`sftp.keyFile` instead.
-                  :::
-                '';
-              };
-
-              passwordFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the SFTP password.
-                  Mutually exclusive with {option}`sftp.password`.
-
-                  ::: {.warning}
-                  Password authentication is less secure than key-based authentication.
-                  Prefer setting {option}`sftp.keyFile` with an SSH private key instead.
-                  :::
-                '';
-              };
-
-              knownHostsFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to SSH known_hosts file for host key verification.
-                '';
-              };
-            };
-
-            webdav = {
-              url = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  WebDAV server URL.
-                  Mutually exclusive with {option}`webdav.urlFile`.
-                '';
-                example = "https://webdav.example.com/backup";
-              };
-
-              urlFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the WebDAV server URL.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`webdav.url`.
-                '';
-              };
-
-              username = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  WebDAV username for authentication.
-                  Mutually exclusive with {option}`webdav.usernameFile`.
-                '';
-              };
-
-              usernameFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the WebDAV username.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`webdav.username`.
-                '';
-              };
-
-              password = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  WebDAV password for authentication.
-                  Mutually exclusive with {option}`webdav.passwordFile`.
-
-                  ::: {.warning}
-                  This password will be stored in the Nix store in plain text.
-                  Prefer {option}`webdav.passwordFile` instead.
-                  :::
-                '';
-              };
-
-              passwordFile = lib.mkOption {
-                type = with lib.types; nullOr str;
-                default = null;
-                description = ''
-                  Path to a file containing the WebDAV password.
-                  Read at runtime for secrets management.
-                  Mutually exclusive with {option}`webdav.password`.
-                '';
-              };
-
-              flat = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
-                description = ''
-                  Use flat directory structure on the WebDAV server.
-                '';
-              };
-
-              atomicWrites = lib.mkOption {
-                type = lib.types.bool;
-                default = false;
-                description = ''
-                  Assume the WebDAV provider implements atomic writes.
-                '';
-              };
             };
           };
         }
@@ -338,144 +378,153 @@ in
         name: backup:
         let
           prefix = "services.kopia.backups.${name}";
-          isS3 = backup.repositoryType == "s3";
-          isSftp = backup.repositoryType == "sftp";
-          isWebdav = backup.repositoryType == "webdav";
+          repo = backup.repository;
         in
-        [
-          {
-            assertion = backup.repositoryType == "filesystem" -> backup.repositoryPath != null;
-            message = "${prefix}: repositoryPath must be set when repositoryType is \"filesystem\"";
-          }
-          {
-            assertion = isS3 -> backup.s3.bucket != null;
-            message = "${prefix}: s3.bucket must be set when repositoryType is \"s3\"";
-          }
-          {
-            assertion = isS3 -> (backup.s3.accessKeyId != null || backup.s3.accessKeyIdFile != null);
-            message = "${prefix}: one of s3.accessKeyId or s3.accessKeyIdFile must be set when repositoryType is \"s3\"";
-          }
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "s3.accessKeyId";
-            optionB = "s3.accessKeyIdFile";
-            valueA = backup.s3.accessKeyId;
-            valueB = backup.s3.accessKeyIdFile;
-          })
-          {
-            assertion = isS3 -> (backup.s3.secretAccessKey != null || backup.s3.secretAccessKeyFile != null);
-            message = "${prefix}: one of s3.secretAccessKey or s3.secretAccessKeyFile must be set when repositoryType is \"s3\"";
-          }
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "s3.secretAccessKey";
-            optionB = "s3.secretAccessKeyFile";
-            valueA = backup.s3.secretAccessKey;
-            valueB = backup.s3.secretAccessKeyFile;
-          })
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "s3.sessionToken";
-            optionB = "s3.sessionTokenFile";
-            valueA = backup.s3.sessionToken;
-            valueB = backup.s3.sessionTokenFile;
-          })
-          {
-            assertion = isSftp -> (backup.sftp.host != null || backup.sftp.hostFile != null);
-            message = "${prefix}: one of sftp.host or sftp.hostFile must be set when repositoryType is \"sftp\"";
-          }
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "sftp.host";
-            optionB = "sftp.hostFile";
-            valueA = backup.sftp.host;
-            valueB = backup.sftp.hostFile;
-          })
-          {
-            assertion = isSftp -> backup.sftp.username != null;
-            message = "${prefix}: sftp.username must be set when repositoryType is \"sftp\"";
-          }
-          {
-            assertion = isSftp -> backup.sftp.path != null;
-            message = "${prefix}: sftp.path must be set when repositoryType is \"sftp\"";
-          }
-          {
-            assertion =
-              isSftp
-              -> (
-                backup.sftp.keyFile != null || backup.sftp.password != null || backup.sftp.passwordFile != null
-              );
-            message = "${prefix}: at least one of sftp.keyFile, sftp.password, or sftp.passwordFile must be set when repositoryType is \"sftp\"";
-          }
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "sftp.password";
-            optionB = "sftp.passwordFile";
-            valueA = backup.sftp.password;
-            valueB = backup.sftp.passwordFile;
-          })
-          {
-            assertion = isWebdav -> (backup.webdav.url != null || backup.webdav.urlFile != null);
-            message = "${prefix}: one of webdav.url or webdav.urlFile must be set when repositoryType is \"webdav\"";
-          }
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "webdav.url";
-            optionB = "webdav.urlFile";
-            valueA = backup.webdav.url;
-            valueB = backup.webdav.urlFile;
-          })
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "webdav.username";
-            optionB = "webdav.usernameFile";
-            valueA = backup.webdav.username;
-            valueB = backup.webdav.usernameFile;
-          })
-          (helpers.mkMutualExclusionAssertion {
-            inherit name;
-            optionA = "webdav.password";
-            optionB = "webdav.passwordFile";
-            valueA = backup.webdav.password;
-            valueB = backup.webdav.passwordFile;
-          })
-        ]
+        lib.optionals (repo ? s3) (
+          let
+            s3 = repo.s3;
+          in
+          [
+            {
+              assertion = s3.accessKeyId != null || s3.accessKeyIdFile != null;
+              message = "${prefix}: one of repository.s3.accessKeyId or repository.s3.accessKeyIdFile must be set";
+            }
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.s3.accessKeyId";
+              optionB = "repository.s3.accessKeyIdFile";
+              valueA = s3.accessKeyId;
+              valueB = s3.accessKeyIdFile;
+            })
+            {
+              assertion = s3.secretAccessKey != null || s3.secretAccessKeyFile != null;
+              message = "${prefix}: one of repository.s3.secretAccessKey or repository.s3.secretAccessKeyFile must be set";
+            }
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.s3.secretAccessKey";
+              optionB = "repository.s3.secretAccessKeyFile";
+              valueA = s3.secretAccessKey;
+              valueB = s3.secretAccessKeyFile;
+            })
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.s3.sessionToken";
+              optionB = "repository.s3.sessionTokenFile";
+              valueA = s3.sessionToken;
+              valueB = s3.sessionTokenFile;
+            })
+          ]
+        )
+        ++ lib.optionals (repo ? sftp) (
+          let
+            sftp = repo.sftp;
+          in
+          [
+            {
+              assertion = sftp.host != null || sftp.hostFile != null;
+              message = "${prefix}: one of repository.sftp.host or repository.sftp.hostFile must be set";
+            }
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.sftp.host";
+              optionB = "repository.sftp.hostFile";
+              valueA = sftp.host;
+              valueB = sftp.hostFile;
+            })
+            {
+              assertion = sftp.keyFile != null || sftp.password != null || sftp.passwordFile != null;
+              message = "${prefix}: at least one of repository.sftp.keyFile, repository.sftp.password, or repository.sftp.passwordFile must be set";
+            }
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.sftp.password";
+              optionB = "repository.sftp.passwordFile";
+              valueA = sftp.password;
+              valueB = sftp.passwordFile;
+            })
+          ]
+        )
+        ++ lib.optionals (repo ? webdav) (
+          let
+            dav = repo.webdav;
+          in
+          [
+            {
+              assertion = dav.url != null || dav.urlFile != null;
+              message = "${prefix}: one of repository.webdav.url or repository.webdav.urlFile must be set";
+            }
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.webdav.url";
+              optionB = "repository.webdav.urlFile";
+              valueA = dav.url;
+              valueB = dav.urlFile;
+            })
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.webdav.username";
+              optionB = "repository.webdav.usernameFile";
+              valueA = dav.username;
+              valueB = dav.usernameFile;
+            })
+            (helpers.mkMutualExclusionAssertion {
+              inherit name;
+              optionA = "repository.webdav.password";
+              optionB = "repository.webdav.passwordFile";
+              valueA = dav.password;
+              valueB = dav.passwordFile;
+            })
+          ]
+        )
       ) cfg.backups
     );
 
     warnings = lib.flatten (
       lib.mapAttrsToList (
         name: backup:
-        helpers.mkPlainTextWarning {
-          inherit name;
-          option = "s3.accessKeyId";
-          value = backup.s3.accessKeyId;
-          fileOption = "s3.accessKeyIdFile";
-        }
-        ++ helpers.mkPlainTextWarning {
-          inherit name;
-          option = "s3.secretAccessKey";
-          value = backup.s3.secretAccessKey;
-          fileOption = "s3.secretAccessKeyFile";
-        }
-        ++ helpers.mkPlainTextWarning {
-          inherit name;
-          option = "s3.sessionToken";
-          value = backup.s3.sessionToken;
-          fileOption = "s3.sessionTokenFile";
-        }
-        ++ helpers.mkPlainTextWarning {
-          inherit name;
-          option = "sftp.password";
-          value = backup.sftp.password;
-          fileOption = "sftp.passwordFile";
-        }
-        ++ helpers.mkPlainTextWarning {
-          inherit name;
-          option = "webdav.password";
-          value = backup.webdav.password;
-          fileOption = "webdav.passwordFile";
-        }
+        let
+          repo = backup.repository;
+        in
+        lib.optionals (repo ? s3) (
+          let
+            s3 = repo.s3;
+          in
+          helpers.mkPlainTextWarning {
+            inherit name;
+            option = "repository.s3.accessKeyId";
+            value = s3.accessKeyId;
+            fileOption = "repository.s3.accessKeyIdFile";
+          }
+          ++ helpers.mkPlainTextWarning {
+            inherit name;
+            option = "repository.s3.secretAccessKey";
+            value = s3.secretAccessKey;
+            fileOption = "repository.s3.secretAccessKeyFile";
+          }
+          ++ helpers.mkPlainTextWarning {
+            inherit name;
+            option = "repository.s3.sessionToken";
+            value = s3.sessionToken;
+            fileOption = "repository.s3.sessionTokenFile";
+          }
+        )
+        ++ lib.optionals (repo ? sftp) (
+          helpers.mkPlainTextWarning {
+            inherit name;
+            option = "repository.sftp.password";
+            value = repo.sftp.password;
+            fileOption = "repository.sftp.passwordFile";
+          }
+        )
+        ++ lib.optionals (repo ? webdav) (
+          helpers.mkPlainTextWarning {
+            inherit name;
+            option = "repository.webdav.password";
+            value = repo.webdav.password;
+            fileOption = "repository.webdav.passwordFile";
+          }
+        )
       ) cfg.backups
     );
 
@@ -483,129 +532,104 @@ in
       name: backup:
       let
         kopiaExe = lib.getExe cfg.package;
-        needsNetwork = builtins.elem backup.repositoryType [
-          "s3"
-          "sftp"
-          "webdav"
-        ];
-        startScript =
-          if backup.repositoryType == "webdav" then
-            let
-              dav = backup.webdav;
-            in
-            pkgs.writeShellScript "kopia-repository-connect-${name}" ''
-              set -euo pipefail
-              export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
+        repo = backup.repository;
+        needsNetwork = !(repo ? filesystem);
 
-              ${
-                if dav.url != null then
-                  "WEBDAV_URL=${lib.escapeShellArg dav.url}"
-                else
-                  ''WEBDAV_URL="$(cat ${lib.escapeShellArg dav.urlFile})"''
-              }
-              WEBDAV_ARGS="--url $WEBDAV_URL"
-              ${lib.optionalString dav.flat ''
-                WEBDAV_ARGS="$WEBDAV_ARGS --flat"
-              ''}
-              ${lib.optionalString dav.atomicWrites ''
-                WEBDAV_ARGS="$WEBDAV_ARGS --atomic-writes"
-              ''}
-              ${lib.optionalString (dav.username != null) ''
-                export KOPIA_WEBDAV_USERNAME=${lib.escapeShellArg dav.username}
-              ''}
-              ${lib.optionalString (dav.usernameFile != null) ''
-                export KOPIA_WEBDAV_USERNAME="$(cat ${lib.escapeShellArg dav.usernameFile})"
-              ''}
-              ${lib.optionalString (dav.password != null) ''
-                export KOPIA_WEBDAV_PASSWORD=${lib.escapeShellArg dav.password}
-              ''}
-              ${lib.optionalString (dav.passwordFile != null) ''
-                export KOPIA_WEBDAV_PASSWORD="$(cat ${lib.escapeShellArg dav.passwordFile})"
-              ''}
-
-              if ! ${kopiaExe} repository connect webdav $WEBDAV_ARGS; then
-                ${kopiaExe} repository create webdav $WEBDAV_ARGS
-              fi
+        mkScriptBody =
+          if repo ? filesystem then
             ''
-          else if backup.repositoryType == "sftp" then
+              REPO_ARGS="--path ${lib.escapeShellArg repo.filesystem.path}"
+              ${mkConnectOrCreate kopiaExe "filesystem" "REPO_ARGS"}
+            ''
+          else if repo ? s3 then
             let
-              sftp = backup.sftp;
+              s3 = repo.s3;
             in
-            pkgs.writeShellScript "kopia-repository-connect-${name}" ''
-              set -euo pipefail
-              export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
-
-              ${
-                if sftp.host != null then
-                  "SFTP_HOST=${lib.escapeShellArg sftp.host}"
-                else
-                  ''SFTP_HOST="$(cat ${lib.escapeShellArg sftp.hostFile})"''
-              }
-              SFTP_ARGS="--path ${lib.escapeShellArg sftp.path} --host $SFTP_HOST --port ${toString sftp.port} --username ${lib.escapeShellArg sftp.username}"
+            ''
+              ${mkCredentialExport {
+                varName = "AWS_ACCESS_KEY_ID";
+                value = s3.accessKeyId;
+                valueFile = s3.accessKeyIdFile;
+              }}
+              ${mkCredentialExport {
+                varName = "AWS_SECRET_ACCESS_KEY";
+                value = s3.secretAccessKey;
+                valueFile = s3.secretAccessKeyFile;
+              }}
+              ${mkCredentialExport {
+                varName = "AWS_SESSION_TOKEN";
+                value = s3.sessionToken;
+                valueFile = s3.sessionTokenFile;
+              }}
+              REPO_ARGS="--bucket ${lib.escapeShellArg s3.bucket} --endpoint ${lib.escapeShellArg s3.endpoint} --region ${lib.escapeShellArg s3.region}"
+              ${lib.optionalString s3.disableTLS ''
+                REPO_ARGS="$REPO_ARGS --disable-tls"
+              ''}
+              ${mkConnectOrCreate kopiaExe "s3" "REPO_ARGS"}
+            ''
+          else if repo ? sftp then
+            let
+              sftp = repo.sftp;
+            in
+            ''
+              ${mkCredentialExport {
+                varName = "SFTP_HOST";
+                value = sftp.host;
+                valueFile = sftp.hostFile;
+                export = false;
+              }}
+              REPO_ARGS="--path ${lib.escapeShellArg sftp.path} --host $SFTP_HOST --port ${toString sftp.port} --username ${lib.escapeShellArg sftp.username}"
               ${lib.optionalString (sftp.keyFile != null) ''
-                SFTP_ARGS="$SFTP_ARGS --keyfile ${lib.escapeShellArg sftp.keyFile}"
+                REPO_ARGS="$REPO_ARGS --keyfile ${lib.escapeShellArg sftp.keyFile}"
               ''}
               ${lib.optionalString (sftp.knownHostsFile != null) ''
-                SFTP_ARGS="$SFTP_ARGS --known-hosts ${lib.escapeShellArg sftp.knownHostsFile}"
+                REPO_ARGS="$REPO_ARGS --known-hosts ${lib.escapeShellArg sftp.knownHostsFile}"
               ''}
               ${lib.optionalString (sftp.password != null) ''
-                SFTP_ARGS="$SFTP_ARGS --sftp-password ${lib.escapeShellArg sftp.password}"
+                REPO_ARGS="$REPO_ARGS --sftp-password ${lib.escapeShellArg sftp.password}"
               ''}
               ${lib.optionalString (sftp.passwordFile != null) ''
-                SFTP_ARGS="$SFTP_ARGS --sftp-password $(cat ${lib.escapeShellArg sftp.passwordFile})"
+                REPO_ARGS="$REPO_ARGS --sftp-password $(cat ${lib.escapeShellArg sftp.passwordFile})"
               ''}
-
-              if ! ${kopiaExe} repository connect sftp $SFTP_ARGS; then
-                ${kopiaExe} repository create sftp $SFTP_ARGS
-              fi
-            ''
-          else if backup.repositoryType == "s3" then
-            let
-              s3 = backup.s3;
-            in
-            pkgs.writeShellScript "kopia-repository-connect-${name}" ''
-              set -euo pipefail
-              export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
-
-              ${
-                if s3.accessKeyId != null then
-                  "export AWS_ACCESS_KEY_ID=${lib.escapeShellArg s3.accessKeyId}"
-                else
-                  ''export AWS_ACCESS_KEY_ID="$(cat ${lib.escapeShellArg s3.accessKeyIdFile})"''
-              }
-              ${
-                if s3.secretAccessKey != null then
-                  "export AWS_SECRET_ACCESS_KEY=${lib.escapeShellArg s3.secretAccessKey}"
-                else
-                  ''export AWS_SECRET_ACCESS_KEY="$(cat ${lib.escapeShellArg s3.secretAccessKeyFile})"''
-              }
-              ${lib.optionalString (s3.sessionToken != null) ''
-                export AWS_SESSION_TOKEN=${lib.escapeShellArg s3.sessionToken}
-              ''}
-              ${lib.optionalString (s3.sessionTokenFile != null) ''
-                export AWS_SESSION_TOKEN="$(cat ${lib.escapeShellArg s3.sessionTokenFile})"
-              ''}
-              S3_ARGS="--bucket ${lib.escapeShellArg s3.bucket} --endpoint ${lib.escapeShellArg s3.endpoint} --region ${lib.escapeShellArg s3.region}"
-              ${lib.optionalString s3.disableTLS ''
-                S3_ARGS="$S3_ARGS --disable-tls"
-              ''}
-
-              if ! ${kopiaExe} repository connect s3 $S3_ARGS; then
-                ${kopiaExe} repository create s3 $S3_ARGS
-              fi
+              ${mkConnectOrCreate kopiaExe "sftp" "REPO_ARGS"}
             ''
           else
             let
-              repoArgs = lib.concatStringsSep " " (mkRepositoryArgs backup);
+              dav = repo.webdav;
             in
-            pkgs.writeShellScript "kopia-repository-connect-${name}" ''
-              set -euo pipefail
-              export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
-
-              if ! ${kopiaExe} repository connect ${backup.repositoryType} ${repoArgs}; then
-                ${kopiaExe} repository create ${backup.repositoryType} ${repoArgs}
-              fi
+            ''
+              ${mkCredentialExport {
+                varName = "WEBDAV_URL";
+                value = dav.url;
+                valueFile = dav.urlFile;
+                export = false;
+              }}
+              REPO_ARGS="--url $WEBDAV_URL"
+              ${lib.optionalString dav.flat ''
+                REPO_ARGS="$REPO_ARGS --flat"
+              ''}
+              ${lib.optionalString dav.atomicWrites ''
+                REPO_ARGS="$REPO_ARGS --atomic-writes"
+              ''}
+              ${mkCredentialExport {
+                varName = "KOPIA_WEBDAV_USERNAME";
+                value = dav.username;
+                valueFile = dav.usernameFile;
+              }}
+              ${mkCredentialExport {
+                varName = "KOPIA_WEBDAV_PASSWORD";
+                value = dav.password;
+                valueFile = dav.passwordFile;
+              }}
+              ${mkConnectOrCreate kopiaExe "webdav" "REPO_ARGS"}
             '';
+
+        startScript = pkgs.writeShellScript "kopia-repository-connect-${name}" ''
+          set -euo pipefail
+          export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
+
+          ${mkScriptBody}
+        '';
       in
       lib.nameValuePair (helpers.mkUnitBaseName "repository" name) {
         description = "Kopia repository connection for ${name}";

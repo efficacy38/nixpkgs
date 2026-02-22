@@ -18,7 +18,7 @@
     ReadWritePaths = [
       "/var/lib/kopia/${name}"
     ]
-    ++ lib.optional (backup.repositoryType == "filesystem") backup.repositoryPath;
+    ++ lib.optional (backup.repository ? filesystem) backup.repository.filesystem.path;
   };
 
   # Assert two options are mutually exclusive (both can be null).
@@ -31,7 +31,7 @@
       valueB,
     }:
     {
-      assertion = !(valueA != null && valueB != null);
+      assertion = valueA == null || valueB == null;
       message = "services.kopia.backups.${name}: ${optionA} and ${optionB} are mutually exclusive";
     };
 

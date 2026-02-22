@@ -51,8 +51,7 @@ in
       {
         # Simple filesystem backup without pre-snapshots.
         localbackup = {
-          repositoryType = "filesystem";
-          repositoryPath = "/mnt/backup";
+          repository.filesystem.path = "/mnt/backup";
           passwordFile = "/run/secrets/kopia-password";
           paths = [ "/home" "/var/lib/postgresql" ];
           policy.retention.keepDaily = 7;
@@ -65,8 +64,7 @@ in
         # Enabling preSnapshot is optional but recommended for btrfs users to
         # avoid backing up files in an inconsistent state.
         btrfs-backup = {
-          repositoryType = "filesystem";
-          repositoryPath = "/mnt/backup";
+          repository.filesystem.path = "/mnt/backup";
           passwordFile = "/run/secrets/kopia-password";
           # NOTE: when using preSnapshot, the path being backed up must reside
           # on a btrfs subvolume. A regular directory on btrfs cannot be
@@ -92,14 +90,14 @@ in
         # Enabling preSnapshot is optional but recommended for ZFS users to
         # avoid backing up files in an inconsistent state.
         zfs-backup = {
-          repositoryType = "s3";
-          s3.bucket = "my-kopia-backup";
-          # s3.endpoint defaults to "s3.amazonaws.com" and can be omitted for AWS.
-          # s3.region defaults to "us-east-1" and can be omitted if that is your region.
+          repository.s3 = {
+            bucket = "my-kopia-backup";
+            # endpoint defaults to "s3.amazonaws.com" and can be omitted for AWS.
+            # region defaults to "us-east-1" and can be omitted if that is your region.
+            accessKeyIdFile = "/run/secrets/aws-access-key-id";
+            secretAccessKeyFile = "/run/secrets/aws-secret-access-key";
+          };
           passwordFile = "/run/secrets/kopia-password";
-          # S3 credentials read from files at runtime.
-          s3.accessKeyIdFile = "/run/secrets/aws-access-key-id";
-          s3.secretAccessKeyFile = "/run/secrets/aws-secret-access-key";
           # NOTE: when using preSnapshot, the path being backed up must be the
           # mount point of a ZFS dataset. A subdirectory within a dataset cannot
           # be snapshotted — only datasets can.
@@ -123,8 +121,7 @@ in
         # SFTP example: backs up to a remote server over SSH/SFTP.
         # Key-based authentication is preferred for security.
         sftp-backup = {
-          repositoryType = "sftp";
-          sftp = {
+          repository.sftp = {
             # Use host for a plain hostname, or hostFile to read it from a file
             # at runtime (e.g. for secrets management). They are mutually exclusive.
             host = "backup.example.com";
@@ -142,8 +139,7 @@ in
 
         # WebDAV example: backs up to a WebDAV server.
         webdav-backup = {
-          repositoryType = "webdav";
-          webdav = {
+          repository.webdav = {
             url = "https://webdav.example.com/backup/kopia";
             # Use passwordFile to read credentials from a file at runtime.
             usernameFile = "/run/secrets/webdav-username";

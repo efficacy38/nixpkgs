@@ -106,8 +106,7 @@ in
       services.kopia.backups = {
         # Test: filesystem backend basic
         filesystem-basic = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo";
+          repository.filesystem.path = "/var/lib/kopia-repo";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
@@ -115,8 +114,7 @@ in
 
         # Test: filesystem with policy
         with-policy = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-policy";
+          repository.filesystem.path = "/var/lib/kopia-repo-policy";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
@@ -126,8 +124,7 @@ in
 
         # Test: web UI
         with-web = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-web";
+          repository.filesystem.path = "/var/lib/kopia-repo-web";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
@@ -137,8 +134,7 @@ in
 
         # Test: btrfs pre-snapshot with nested subvolumes
         btrfs-presnapshot = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-btrfs";
+          repository.filesystem.path = "/var/lib/kopia-repo-btrfs";
           inherit passwordFile;
           paths = [ "/mnt/btrfs/data" ];
           timerConfig = null;
@@ -151,8 +147,7 @@ in
 
         # Test: backup hooks
         with-hooks = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-hooks";
+          repository.filesystem.path = "/var/lib/kopia-repo-hooks";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
@@ -162,8 +157,7 @@ in
 
         # Test: SFTP backend with plain text password
         sftp-basic = {
-          repositoryType = "sftp";
-          sftp = {
+          repository.sftp = {
             host = "server";
             path = "/home/kopia/repo";
             username = "kopia";
@@ -177,8 +171,7 @@ in
 
         # Test: SFTP backend with file-based password
         sftp-password-file = {
-          repositoryType = "sftp";
-          sftp = {
+          repository.sftp = {
             host = "server";
             path = "/home/kopia/repo-file";
             username = "kopia";
@@ -192,8 +185,7 @@ in
 
         # Test: WebDAV backend with plain text credentials
         webdav-basic = {
-          repositoryType = "webdav";
-          webdav = {
+          repository.webdav = {
             url = "http://server:8080/";
             username = "kopia";
             password = "kopia-webdav-pass";
@@ -205,8 +197,7 @@ in
 
         # Test: WebDAV backend with file-based credentials
         webdav-file-creds = {
-          repositoryType = "webdav";
-          webdav = {
+          repository.webdav = {
             url = "http://server:8080/file-creds/";
             usernameFile = webdavUsernameFile;
             passwordFile = webdavPasswordFile;
@@ -218,8 +209,7 @@ in
 
         # Test: S3 backend with file-based credentials (via MinIO)
         s3-basic = {
-          repositoryType = "s3";
-          s3 = {
+          repository.s3 = {
             bucket = "kopia-test";
             endpoint = "server:9000";
             accessKeyIdFile = s3AccessKeyIdFile;
@@ -233,8 +223,7 @@ in
 
         # Test: S3 backend with plain text credentials
         s3-plaintext = {
-          repositoryType = "s3";
-          s3 = {
+          repository.s3 = {
             bucket = "kopia-test-plaintext";
             endpoint = "server:9000";
             accessKeyId = "minioadmin";
@@ -248,16 +237,14 @@ in
 
         # Test: timer (uses default timerConfig)
         with-timer = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-timer";
+          repository.filesystem.path = "/var/lib/kopia-repo-timer";
           inherit passwordFile;
           paths = [ "/opt" ];
         };
 
         # Test: extra snapshot args
         with-extra-args = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-extra-args";
+          repository.filesystem.path = "/var/lib/kopia-repo-extra-args";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
@@ -269,8 +256,7 @@ in
 
         # Test: expanded policy options
         with-expanded-policy = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-expanded-policy";
+          repository.filesystem.path = "/var/lib/kopia-repo-expanded-policy";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
@@ -297,8 +283,7 @@ in
 
         # Test: custom web port
         with-web-custom-port = {
-          repositoryType = "filesystem";
-          repositoryPath = "/var/lib/kopia-repo-web-custom";
+          repository.filesystem.path = "/var/lib/kopia-repo-web-custom";
           inherit passwordFile;
           paths = [ "/opt" ];
           timerConfig = null;
