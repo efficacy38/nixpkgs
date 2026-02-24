@@ -8,34 +8,6 @@ let
   cfg = config.services.kopia;
   helpers = import ./helpers.nix { inherit lib; };
 
-  # Generate a shell snippet that sets a variable from either a literal value or a file.
-  # If both are null, returns the empty string.
-  mkCredentialExport =
-    {
-      varName,
-      value,
-      valueFile,
-      export ? true,
-    }:
-    let
-      prefix = if export then "export " else "";
-    in
-    if value != null then
-      "${prefix}${varName}=${lib.escapeShellArg value}"
-    else if valueFile != null then
-      ''${prefix}${varName}="$(cat ${lib.escapeShellArg valueFile})"''
-    else
-      "";
-
-  # Generate the connect-or-create script body for a given backend type and args variable.
-  mkConnectOrCreate =
-    kopiaExe: backendType: argsVar:
-    ''
-      if ! ${kopiaExe} repository connect ${backendType} ''$${argsVar}; then
-        ${kopiaExe} repository create ${backendType} ''$${argsVar}
-      fi
-    '';
-
   filesystemSubmodule = lib.types.submodule {
     options = {
       path = lib.mkOption {
@@ -372,277 +344,306 @@ in
     );
   };
 
-  config = lib.mkIf (cfg.backups != { }) {
-    assertions = lib.flatten (
-      lib.mapAttrsToList (
-        name: backup:
+  config =
+    let
+      # Generate a shell snippet that sets a variable from either a literal value or a file.
+      # If both are null, returns the empty string.
+      mkCredentialExport =
+        {
+          varName,
+          value,
+          valueFile,
+          export ? true,
+        }:
         let
-          prefix = "services.kopia.backups.${name}";
-          repo = backup.repository;
+          prefix = if export then "export " else "";
         in
-        lib.optionals (repo ? s3) (
-          let
-            s3 = repo.s3;
-          in
-          [
-            {
-              assertion = s3.accessKeyId != null || s3.accessKeyIdFile != null;
-              message = "${prefix}: one of repository.s3.accessKeyId or repository.s3.accessKeyIdFile must be set";
-            }
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.s3.accessKeyId";
-              optionB = "repository.s3.accessKeyIdFile";
-              valueA = s3.accessKeyId;
-              valueB = s3.accessKeyIdFile;
-            })
-            {
-              assertion = s3.secretAccessKey != null || s3.secretAccessKeyFile != null;
-              message = "${prefix}: one of repository.s3.secretAccessKey or repository.s3.secretAccessKeyFile must be set";
-            }
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.s3.secretAccessKey";
-              optionB = "repository.s3.secretAccessKeyFile";
-              valueA = s3.secretAccessKey;
-              valueB = s3.secretAccessKeyFile;
-            })
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.s3.sessionToken";
-              optionB = "repository.s3.sessionTokenFile";
-              valueA = s3.sessionToken;
-              valueB = s3.sessionTokenFile;
-            })
-          ]
-        )
-        ++ lib.optionals (repo ? sftp) (
-          let
-            sftp = repo.sftp;
-          in
-          [
-            {
-              assertion = sftp.host != null || sftp.hostFile != null;
-              message = "${prefix}: one of repository.sftp.host or repository.sftp.hostFile must be set";
-            }
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.sftp.host";
-              optionB = "repository.sftp.hostFile";
-              valueA = sftp.host;
-              valueB = sftp.hostFile;
-            })
-            {
-              assertion = sftp.keyFile != null || sftp.password != null || sftp.passwordFile != null;
-              message = "${prefix}: at least one of repository.sftp.keyFile, repository.sftp.password, or repository.sftp.passwordFile must be set";
-            }
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.sftp.password";
-              optionB = "repository.sftp.passwordFile";
-              valueA = sftp.password;
-              valueB = sftp.passwordFile;
-            })
-          ]
-        )
-        ++ lib.optionals (repo ? webdav) (
-          let
-            dav = repo.webdav;
-          in
-          [
-            {
-              assertion = dav.url != null || dav.urlFile != null;
-              message = "${prefix}: one of repository.webdav.url or repository.webdav.urlFile must be set";
-            }
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.webdav.url";
-              optionB = "repository.webdav.urlFile";
-              valueA = dav.url;
-              valueB = dav.urlFile;
-            })
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.webdav.username";
-              optionB = "repository.webdav.usernameFile";
-              valueA = dav.username;
-              valueB = dav.usernameFile;
-            })
-            (helpers.mkMutualExclusionAssertion {
-              inherit name;
-              optionA = "repository.webdav.password";
-              optionB = "repository.webdav.passwordFile";
-              valueA = dav.password;
-              valueB = dav.passwordFile;
-            })
-          ]
-        )
-      ) cfg.backups
-    );
+        if value != null then
+          "${prefix}${varName}=${lib.escapeShellArg value}"
+        else if valueFile != null then
+          ''${prefix}${varName}="$(cat ${lib.escapeShellArg valueFile})"''
+        else
+          "";
 
-    warnings = lib.flatten (
-      lib.mapAttrsToList (
-        name: backup:
-        let
-          repo = backup.repository;
-        in
-        lib.optionals (repo ? s3) (
+      # Generate the connect-or-create script body for a given backend type and args variable.
+      mkConnectOrCreate = kopiaExe: backendType: argsVar: ''
+        if ! ${kopiaExe} repository connect ${backendType} ''$${argsVar}; then
+          ${kopiaExe} repository create ${backendType} ''$${argsVar}
+        fi
+      '';
+    in
+    lib.mkIf (cfg.backups != { }) {
+      assertions = lib.flatten (
+        lib.mapAttrsToList (
+          name: backup:
           let
-            s3 = repo.s3;
+            prefix = "services.kopia.backups.${name}";
+            repo = backup.repository;
           in
-          helpers.mkPlainTextWarning {
-            inherit name;
-            option = "repository.s3.accessKeyId";
-            value = s3.accessKeyId;
-            fileOption = "repository.s3.accessKeyIdFile";
-          }
-          ++ helpers.mkPlainTextWarning {
-            inherit name;
-            option = "repository.s3.secretAccessKey";
-            value = s3.secretAccessKey;
-            fileOption = "repository.s3.secretAccessKeyFile";
-          }
-          ++ helpers.mkPlainTextWarning {
-            inherit name;
-            option = "repository.s3.sessionToken";
-            value = s3.sessionToken;
-            fileOption = "repository.s3.sessionTokenFile";
-          }
-        )
-        ++ lib.optionals (repo ? sftp) (
-          helpers.mkPlainTextWarning {
-            inherit name;
-            option = "repository.sftp.password";
-            value = repo.sftp.password;
-            fileOption = "repository.sftp.passwordFile";
-          }
-        )
-        ++ lib.optionals (repo ? webdav) (
-          helpers.mkPlainTextWarning {
-            inherit name;
-            option = "repository.webdav.password";
-            value = repo.webdav.password;
-            fileOption = "repository.webdav.passwordFile";
-          }
-        )
-      ) cfg.backups
-    );
-
-    systemd.services = lib.mapAttrs' (
-      name: backup:
-      let
-        kopiaExe = lib.getExe cfg.package;
-        repo = backup.repository;
-        needsNetwork = !(repo ? filesystem);
-
-        mkScriptBody =
-          if repo ? filesystem then
-            ''
-              REPO_ARGS="--path ${lib.escapeShellArg repo.filesystem.path}"
-              ${mkConnectOrCreate kopiaExe "filesystem" "REPO_ARGS"}
-            ''
-          else if repo ? s3 then
+          lib.optionals (repo ? s3) (
             let
               s3 = repo.s3;
             in
-            ''
-              ${mkCredentialExport {
-                varName = "AWS_ACCESS_KEY_ID";
-                value = s3.accessKeyId;
-                valueFile = s3.accessKeyIdFile;
-              }}
-              ${mkCredentialExport {
-                varName = "AWS_SECRET_ACCESS_KEY";
-                value = s3.secretAccessKey;
-                valueFile = s3.secretAccessKeyFile;
-              }}
-              ${mkCredentialExport {
-                varName = "AWS_SESSION_TOKEN";
-                value = s3.sessionToken;
-                valueFile = s3.sessionTokenFile;
-              }}
-              REPO_ARGS="--bucket ${lib.escapeShellArg s3.bucket} --endpoint ${lib.escapeShellArg s3.endpoint} --region ${lib.escapeShellArg s3.region}"
-              ${lib.optionalString s3.disableTLS ''
-                REPO_ARGS="$REPO_ARGS --disable-tls"
-              ''}
-              ${mkConnectOrCreate kopiaExe "s3" "REPO_ARGS"}
-            ''
-          else if repo ? sftp then
+            [
+              {
+                assertion = s3.accessKeyId != null || s3.accessKeyIdFile != null;
+                message = "${prefix}: one of repository.s3.accessKeyId or repository.s3.accessKeyIdFile must be set";
+              }
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.s3.accessKeyId";
+                optionB = "repository.s3.accessKeyIdFile";
+                valueA = s3.accessKeyId;
+                valueB = s3.accessKeyIdFile;
+              })
+              {
+                assertion = s3.secretAccessKey != null || s3.secretAccessKeyFile != null;
+                message = "${prefix}: one of repository.s3.secretAccessKey or repository.s3.secretAccessKeyFile must be set";
+              }
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.s3.secretAccessKey";
+                optionB = "repository.s3.secretAccessKeyFile";
+                valueA = s3.secretAccessKey;
+                valueB = s3.secretAccessKeyFile;
+              })
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.s3.sessionToken";
+                optionB = "repository.s3.sessionTokenFile";
+                valueA = s3.sessionToken;
+                valueB = s3.sessionTokenFile;
+              })
+            ]
+          )
+          ++ lib.optionals (repo ? sftp) (
             let
               sftp = repo.sftp;
             in
-            ''
-              ${mkCredentialExport {
-                varName = "SFTP_HOST";
-                value = sftp.host;
-                valueFile = sftp.hostFile;
-                export = false;
-              }}
-              REPO_ARGS="--path ${lib.escapeShellArg sftp.path} --host $SFTP_HOST --port ${toString sftp.port} --username ${lib.escapeShellArg sftp.username}"
-              ${lib.optionalString (sftp.keyFile != null) ''
-                REPO_ARGS="$REPO_ARGS --keyfile ${lib.escapeShellArg sftp.keyFile}"
-              ''}
-              ${lib.optionalString (sftp.knownHostsFile != null) ''
-                REPO_ARGS="$REPO_ARGS --known-hosts ${lib.escapeShellArg sftp.knownHostsFile}"
-              ''}
-              ${lib.optionalString (sftp.password != null) ''
-                REPO_ARGS="$REPO_ARGS --sftp-password ${lib.escapeShellArg sftp.password}"
-              ''}
-              ${lib.optionalString (sftp.passwordFile != null) ''
-                REPO_ARGS="$REPO_ARGS --sftp-password $(cat ${lib.escapeShellArg sftp.passwordFile})"
-              ''}
-              ${mkConnectOrCreate kopiaExe "sftp" "REPO_ARGS"}
-            ''
-          else
+            [
+              {
+                assertion = sftp.host != null || sftp.hostFile != null;
+                message = "${prefix}: one of repository.sftp.host or repository.sftp.hostFile must be set";
+              }
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.sftp.host";
+                optionB = "repository.sftp.hostFile";
+                valueA = sftp.host;
+                valueB = sftp.hostFile;
+              })
+              {
+                assertion = sftp.keyFile != null || sftp.password != null || sftp.passwordFile != null;
+                message = "${prefix}: at least one of repository.sftp.keyFile, repository.sftp.password, or repository.sftp.passwordFile must be set";
+              }
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.sftp.password";
+                optionB = "repository.sftp.passwordFile";
+                valueA = sftp.password;
+                valueB = sftp.passwordFile;
+              })
+            ]
+          )
+          ++ lib.optionals (repo ? webdav) (
             let
               dav = repo.webdav;
             in
-            ''
-              ${mkCredentialExport {
-                varName = "WEBDAV_URL";
-                value = dav.url;
-                valueFile = dav.urlFile;
-                export = false;
-              }}
-              REPO_ARGS="--url $WEBDAV_URL"
-              ${lib.optionalString dav.flat ''
-                REPO_ARGS="$REPO_ARGS --flat"
-              ''}
-              ${lib.optionalString dav.atomicWrites ''
-                REPO_ARGS="$REPO_ARGS --atomic-writes"
-              ''}
-              ${mkCredentialExport {
-                varName = "KOPIA_WEBDAV_USERNAME";
-                value = dav.username;
-                valueFile = dav.usernameFile;
-              }}
-              ${mkCredentialExport {
-                varName = "KOPIA_WEBDAV_PASSWORD";
-                value = dav.password;
-                valueFile = dav.passwordFile;
-              }}
-              ${mkConnectOrCreate kopiaExe "webdav" "REPO_ARGS"}
-            '';
+            [
+              {
+                assertion = dav.url != null || dav.urlFile != null;
+                message = "${prefix}: one of repository.webdav.url or repository.webdav.urlFile must be set";
+              }
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.webdav.url";
+                optionB = "repository.webdav.urlFile";
+                valueA = dav.url;
+                valueB = dav.urlFile;
+              })
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.webdav.username";
+                optionB = "repository.webdav.usernameFile";
+                valueA = dav.username;
+                valueB = dav.usernameFile;
+              })
+              (helpers.mkMutualExclusionAssertion {
+                inherit name;
+                optionA = "repository.webdav.password";
+                optionB = "repository.webdav.passwordFile";
+                valueA = dav.password;
+                valueB = dav.passwordFile;
+              })
+            ]
+          )
+        ) cfg.backups
+      );
 
-        startScript = pkgs.writeShellScript "kopia-repository-connect-${name}" ''
-          set -euo pipefail
-          export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
+      warnings = lib.flatten (
+        lib.mapAttrsToList (
+          name: backup:
+          let
+            repo = backup.repository;
+          in
+          lib.optionals (repo ? s3) (
+            let
+              s3 = repo.s3;
+            in
+            helpers.mkPlainTextWarning {
+              inherit name;
+              option = "repository.s3.accessKeyId";
+              value = s3.accessKeyId;
+              fileOption = "repository.s3.accessKeyIdFile";
+            }
+            ++ helpers.mkPlainTextWarning {
+              inherit name;
+              option = "repository.s3.secretAccessKey";
+              value = s3.secretAccessKey;
+              fileOption = "repository.s3.secretAccessKeyFile";
+            }
+            ++ helpers.mkPlainTextWarning {
+              inherit name;
+              option = "repository.s3.sessionToken";
+              value = s3.sessionToken;
+              fileOption = "repository.s3.sessionTokenFile";
+            }
+          )
+          ++ lib.optionals (repo ? sftp) (
+            helpers.mkPlainTextWarning {
+              inherit name;
+              option = "repository.sftp.password";
+              value = repo.sftp.password;
+              fileOption = "repository.sftp.passwordFile";
+            }
+          )
+          ++ lib.optionals (repo ? webdav) (
+            helpers.mkPlainTextWarning {
+              inherit name;
+              option = "repository.webdav.password";
+              value = repo.webdav.password;
+              fileOption = "repository.webdav.passwordFile";
+            }
+          )
+        ) cfg.backups
+      );
 
-          ${mkScriptBody}
-        '';
-      in
-      lib.nameValuePair (helpers.mkUnitBaseName "repository" name) {
-        description = "Kopia repository connection for ${name}";
-        restartIfChanged = false;
-        wants = lib.optional needsNetwork "network-online.target";
-        after = lib.optional needsNetwork "network-online.target";
-        environment = helpers.mkKopiaEnvironment name;
-        serviceConfig = helpers.mkBaseServiceConfig name backup // {
-          RemainAfterExit = true;
-          ExecStart = startScript;
-          ExecStop = "${kopiaExe} repository disconnect";
-        };
-      }
-    ) cfg.backups;
-  };
+      systemd.services = lib.mapAttrs' (
+        name: backup:
+        let
+          kopiaExe = lib.getExe cfg.package;
+          repo = backup.repository;
+          needsNetwork = !(repo ? filesystem);
+
+          mkScriptBody =
+            if repo ? filesystem then
+              ''
+                REPO_ARGS="--path ${lib.escapeShellArg repo.filesystem.path}"
+                ${mkConnectOrCreate kopiaExe "filesystem" "REPO_ARGS"}
+              ''
+            else if repo ? s3 then
+              let
+                s3 = repo.s3;
+              in
+              ''
+                ${mkCredentialExport {
+                  varName = "AWS_ACCESS_KEY_ID";
+                  value = s3.accessKeyId;
+                  valueFile = s3.accessKeyIdFile;
+                }}
+                ${mkCredentialExport {
+                  varName = "AWS_SECRET_ACCESS_KEY";
+                  value = s3.secretAccessKey;
+                  valueFile = s3.secretAccessKeyFile;
+                }}
+                ${mkCredentialExport {
+                  varName = "AWS_SESSION_TOKEN";
+                  value = s3.sessionToken;
+                  valueFile = s3.sessionTokenFile;
+                }}
+                REPO_ARGS="--bucket ${lib.escapeShellArg s3.bucket} --endpoint ${lib.escapeShellArg s3.endpoint} --region ${lib.escapeShellArg s3.region}"
+                ${lib.optionalString s3.disableTLS ''
+                  REPO_ARGS="$REPO_ARGS --disable-tls"
+                ''}
+                ${mkConnectOrCreate kopiaExe "s3" "REPO_ARGS"}
+              ''
+            else if repo ? sftp then
+              let
+                sftp = repo.sftp;
+              in
+              ''
+                ${mkCredentialExport {
+                  varName = "SFTP_HOST";
+                  value = sftp.host;
+                  valueFile = sftp.hostFile;
+                  export = false;
+                }}
+                REPO_ARGS="--path ${lib.escapeShellArg sftp.path} --host $SFTP_HOST --port ${toString sftp.port} --username ${lib.escapeShellArg sftp.username}"
+                ${lib.optionalString (sftp.keyFile != null) ''
+                  REPO_ARGS="$REPO_ARGS --keyfile ${lib.escapeShellArg sftp.keyFile}"
+                ''}
+                ${lib.optionalString (sftp.knownHostsFile != null) ''
+                  REPO_ARGS="$REPO_ARGS --known-hosts ${lib.escapeShellArg sftp.knownHostsFile}"
+                ''}
+                # TODO: waiting upstream fix(https://github.com/kopia/kopia/issues/5180)
+                ${lib.optionalString (sftp.password != null) ''
+                  REPO_ARGS="$REPO_ARGS --sftp-password ${lib.escapeShellArg sftp.password}"
+                ''}
+                ${lib.optionalString (sftp.passwordFile != null) ''
+                  REPO_ARGS="$REPO_ARGS --sftp-password $(cat ${lib.escapeShellArg sftp.passwordFile})"
+                ''}
+                ${mkConnectOrCreate kopiaExe "sftp" "REPO_ARGS"}
+              ''
+            else
+              let
+                dav = repo.webdav;
+              in
+              ''
+                ${mkCredentialExport {
+                  varName = "WEBDAV_URL";
+                  value = dav.url;
+                  valueFile = dav.urlFile;
+                  export = false;
+                }}
+                REPO_ARGS="--url $WEBDAV_URL"
+                ${lib.optionalString dav.flat ''
+                  REPO_ARGS="$REPO_ARGS --flat"
+                ''}
+                ${lib.optionalString dav.atomicWrites ''
+                  REPO_ARGS="$REPO_ARGS --atomic-writes"
+                ''}
+                ${mkCredentialExport {
+                  varName = "KOPIA_WEBDAV_USERNAME";
+                  value = dav.username;
+                  valueFile = dav.usernameFile;
+                }}
+                ${mkCredentialExport {
+                  varName = "KOPIA_WEBDAV_PASSWORD";
+                  value = dav.password;
+                  valueFile = dav.passwordFile;
+                }}
+                ${mkConnectOrCreate kopiaExe "webdav" "REPO_ARGS"}
+              '';
+
+          startScript = pkgs.writeShellScript "kopia-repository-connect-${name}" ''
+            set -euo pipefail
+            export KOPIA_PASSWORD="$(cat ${lib.escapeShellArg backup.passwordFile})"
+
+            ${mkScriptBody}
+          '';
+        in
+        lib.nameValuePair (helpers.mkUnitBaseName "repository" name) {
+          description = "Kopia repository connection for ${name}";
+          restartIfChanged = false;
+          wants = lib.optional needsNetwork "network-online.target";
+          after = lib.optional needsNetwork "network-online.target";
+          environment = helpers.mkKopiaEnvironment name;
+          serviceConfig = helpers.mkBaseServiceConfig name backup // {
+            RemainAfterExit = true;
+            ExecStart = startScript;
+            ExecStop = "${kopiaExe} repository disconnect";
+          };
+        }
+      ) cfg.backups;
+    };
 }

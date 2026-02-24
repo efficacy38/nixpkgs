@@ -1,12 +1,8 @@
 {
-  config,
   lib,
   pkgs,
   ...
 }:
-let
-  cfg = config.services.kopia;
-in
 {
   imports = [
     ./repository-service.nix
