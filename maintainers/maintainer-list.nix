@@ -3563,12 +3563,6 @@
     githubId = 77934086;
     keys = [ { fingerprint = "4CA3 48F6 8FE1 1777 8EDA 3860 B9A2 C1B0 25EC 2C55"; } ];
   };
-  blenderfreaky = {
-    name = "blenderfreaky";
-    email = "nix@blenderfreaky.de";
-    github = "blenderfreaky";
-    githubId = 14351657;
-  };
   blghnks = {
     email = "bilgehankuch@gmail.com";
     name = "Bilgehan Kuş";
@@ -13841,6 +13835,12 @@
     github = "killercup";
     githubId = 20063;
     name = "Pascal Hertleif";
+  };
+  kilyanni = {
+    name = "Nikolas Kilian";
+    email = "nix@nkilian.org";
+    github = "kilyanni";
+    githubId = 14351657;
   };
   kim0 = {
     email = "email.ahmedkamal@googlemail.com";
