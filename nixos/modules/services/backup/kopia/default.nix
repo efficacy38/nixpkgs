@@ -4,7 +4,10 @@
   ...
 }:
 {
-  meta.maintainers = with lib.maintainers; [ efficacy38 ];
+  meta.maintainers = with lib.maintainers; [
+    efficacy38
+    kilyanni
+  ];
 
   options.services.kopia = {
     package = lib.mkPackageOption pkgs "kopia" { };
