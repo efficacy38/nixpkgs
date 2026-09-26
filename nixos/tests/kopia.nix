@@ -155,7 +155,7 @@ in
         sftp = {
           repository.sftp = {
             host = "server";
-            path = "/home/kopia/repo";
+            path = "/home/kopia/repo with spaces";
             username = "kopia";
             passwordFile = sftpPasswordFile;
             knownHostsFile = "/root/.ssh/known_hosts";
@@ -348,7 +348,7 @@ in
         machine.succeed(
             "mkdir -p /root/.ssh && ssh-keyscan server > /root/.ssh/known_hosts 2>/dev/null"
         )
-        server.succeed("mkdir -p /home/kopia/repo && chown kopia:users /home/kopia/repo")
+        server.succeed("mkdir -p '/home/kopia/repo with spaces' && chown kopia:users '/home/kopia/repo with spaces'")
         machine.succeed("systemctl start kopia-snapshot-sftp-default.service")
         machine.succeed(
             "${kopiaEnv "sftp"}"
